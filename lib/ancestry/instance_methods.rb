@@ -5,8 +5,7 @@ module Ancestry
       errors.add(:base, "#{self.class.name.humanize} cannot be a descendant of itself.") if ancestor_ids.include? self.id
     end
 
-    # Update descendants with new ancestry
-    def update_descendants_with_new_ancestry
+    def update_descendants_with_new_ancestry_origin
       # Skip this if callbacks are disabled
       unless ancestry_callbacks_disabled?
         # If node is not a new record and ancestry was updated and the new ancestry is sane ...
@@ -16,17 +15,53 @@ module Ancestry
             # ... replace old ancestry with new ancestry
             descendant.without_ancestry_callbacks do
               descendant.update_attribute(
-                self.ancestry_base_class.ancestry_column,
-                descendant.read_attribute(descendant.class.ancestry_column).gsub(
-                  /^#{self.child_ancestry}/,
-                  if read_attribute(self.class.ancestry_column).blank? then id.to_s else "#{read_attribute self.class.ancestry_column }/#{id}" end
-                )
+                  self.ancestry_base_class.ancestry_column,
+                  descendant.read_attribute(descendant.class.ancestry_column).gsub(
+                      /^#{self.child_ancestry}/,
+                      if read_attribute(self.class.ancestry_column).blank? then id.to_s else "#{read_attribute self.class.ancestry_column }/#{id}" end
+                  )
               )
             end
           end
         end
       end
     end
+
+    # Update descendants with new ancestry
+    def update_descendants_with_new_ancestry
+      # Skip this if callbacks are disabled
+      unless ancestry_callbacks_disabled?
+        # If node is not a new record and ancestry was updated and the new ancestry is sane ...
+        if ancestry_changed? && !new_record? && sane_ancestry?
+          sql_params = {
+              table: get_arel_table.name,
+              condition: descendant_conditions.to_sql,
+              old_ancestry: self.child_ancestry,
+              new_ancestry: read_attribute(self.class.ancestry_column).blank? ? id.to_s : "#{read_attribute self.class.ancestry_column }/#{id}"
+          }
+
+          if self.ancestry_base_class.respond_to?(:depth_cache_column) && self.respond_to?(self.ancestry_base_class.depth_cache_column)
+            update_sql = <<-SQL
+              update %{table}
+              set ancestry = regexp_replace(ancestry, '^%{old_ancestry}', '%{new_ancestry}'),
+                  %{depth_cache_column} = length(regexp_replace(regexp_replace(ancestry, '^%{old_ancestry}', '%{new_ancestry}'), '\\d', '', 'g')) + 1
+              where %{condition}
+            SQL
+            sql_params[:depth_cache_column] = self.ancestry_base_class.depth_cache_column.to_s
+          else
+            update_sql = <<-SQL
+              update %{table}
+              set ancestry = regexp_replace(ancestry, '^%{old_ancestry}', '%{new_ancestry}')
+              where %{condition}
+            SQL
+          end
+
+          ActiveRecord::Base.connection.execute(update_sql % sql_params)
+        end
+      end
+    end
+
+    # alias :update_descendants_with_new_ancestry :update_descendants_with_new_ancestry_sql
 
     # Apply orphan strategy
     def apply_orphan_strategy
